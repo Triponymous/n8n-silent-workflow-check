@@ -1,5 +1,5 @@
 {
-  "name": "Silent workflow check",
+  "name": "n8n Silent Workflow Check",
   "id": "duskwatchSilentCheck",
   "nodes": [
     {
