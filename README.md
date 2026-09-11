@@ -41,9 +41,9 @@ It always returns exactly one item:
   ],
   "notCovered": [
     {
-      "workflow": "Weekday report",
+      "workflow": "Month start export",
       "workflowId": "eFgH5678",
-      "reason": "Its schedule is not a fixed interval, weekdays only for example, so there is no gap to measure against."
+      "reason": "Its schedule has no fixed rhythm, certain days of the month for example, so there is no gap to measure against."
     }
   ],
   "judged": 9,
@@ -86,7 +86,7 @@ heartbeat service that is down never swallows a real finding.
 Some workflows cannot be judged from execution history. The check lists them under `notCovered`
 with the reason instead of guessing:
 
-- schedules that are not a fixed interval, weekdays only for example;
+- schedules without a fixed rhythm, certain days of the month for example;
 - workflows set not to save successful executions: n8n deletes their healthy runs, so they would
   always look silent;
 - workflows changed recently that have not run since;
