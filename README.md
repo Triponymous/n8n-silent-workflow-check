@@ -1,37 +1,60 @@
 # Silent workflow check for n8n
 
-Finds n8n workflows that are **active but have not run**.
+Finds scheduled n8n workflows that stopped running.
 
 That failure produces no failed execution, so an error workflow never fires for it. It happens
-after a restart that did not re-register the schedule trigger, or when someone toggles a workflow
-off while debugging and forgets it. The execution list looks clean and nothing has run for days.
+after a restart that did not re-register the schedule triggers, or when someone switches a
+workflow off while debugging and forgets it. The execution list looks clean and nothing has run
+for days.
 
 ## What it does
 
-Reads your own instance through the n8n API, takes every active workflow, finds its last
-execution, and returns the ones that have been quiet longer than you allow.
+Reads your own instance through the n8n API. For every active workflow that starts itself
+(Schedule, Cron or Interval trigger) it looks up the last run and compares it with that
+workflow's own schedule. A workflow counts as silent once twice its interval plus five minutes
+has passed without a run: a 15-minute sync is flagged after 35 minutes, a daily report after two
+days, and there is no threshold to set per workflow.
 
-Five nodes: schedule trigger → config → two HTTP requests → one code node. Attach your own alert
-node at the end.
+Workflows started from outside (webhooks, forms, chats, app triggers) are not judged. Idle is
+normal for them, and a check that calls idle broken gets muted within a week.
 
 ```
-Every morning → Configuration → Get workflows → Get executions → Find silent workflows
+Every morning → Configuration → Get workflows → One item per workflow → Get last run
+  → Find silent workflows → Heartbeat URL set → Ping heartbeat
 ```
 
-Output per stalled workflow:
+It always returns exactly one item:
 
 ```json
 {
-  "workflow": "Nightly invoice sync",
-  "workflowId": "aBcD1234",
-  "lastRun": "2026-09-05T02:00:11.000Z",
-  "hoursSilent": 74,
-  "note": "active but stalled"
+  "silent": 1,
+  "summary": "1 of 9 checked workflows missed their schedule: Nightly invoice sync (last run 74 h ago, expected every day). 1 could not be judged, see notCovered.",
+  "findings": [
+    {
+      "workflow": "Nightly invoice sync",
+      "workflowId": "aBcD1234",
+      "expected": "every day",
+      "lastRun": "2026-09-08T02:00:11.000Z",
+      "hoursSilent": 74,
+      "note": "missed at least two scheduled runs"
+    }
+  ],
+  "notCovered": [
+    {
+      "workflow": "Weekday report",
+      "workflowId": "eFgH5678",
+      "reason": "Its schedule is not a fixed interval, weekdays only for example, so there is no gap to measure against."
+    }
+  ],
+  "judged": 9,
+  "notScheduled": 4,
+  "checkSuspect": false,
+  "hint": ""
 }
 ```
 
-When nothing is stalled it returns a single `{ "silent": 0, "activeChecked": 12 }`, so you can
-branch on that before alerting.
+Put an IF on `silent` greater than 0 after **Find silent workflows** and send `summary` to
+wherever your alerts go.
 
 ## Setup
 
@@ -41,21 +64,54 @@ branch on that before alerting.
    - Name: `X-N8N-API-KEY`
    - Value: your API key
 
-   Select the same credential on **Get executions**.
-4. In **Configuration**, set `baseUrl` to your n8n address without a trailing slash, and
-   `staleHours` to how long silence is still normal for you.
-5. Attach your alert node after **Find silent workflows** and activate the workflow.
+   Use the same credential on **Get last run**.
+4. In **Configuration**, set `baseUrl` to your n8n address without a trailing slash.
+5. Optional, see below: set `heartbeatUrl`.
+6. Attach your alert node and activate the workflow.
+
+## Watching the watcher
+
+This workflow lives inside the instance it watches. If that instance is down, mid-restart, or its
+schedule triggers never re-registered, this check does not run either, and its silence looks
+exactly like everything being fine.
+
+The heartbeat closes that gap. Create a free check at a dead man's switch service such as
+[healthchecks.io](https://healthchecks.io), give it a period of one day, and paste its ping URL
+into `heartbeatUrl`. The workflow pings it at the end of every run, whether or not it found
+anything. When the pings stop, the service tells you. The ping node continues on error, so a
+heartbeat service that is down never swallows a real finding.
+
+## When it refuses to answer
+
+Some workflows cannot be judged from execution history. The check lists them under `notCovered`
+with the reason instead of guessing:
+
+- schedules that are not a fixed interval, weekdays only for example;
+- workflows set not to save successful executions: n8n deletes their healthy runs, so they would
+  always look silent;
+- workflows changed recently that have not run since;
+- rare schedules with no saved run, where n8n may already have pruned the last one. A pruned
+  execution is not evidence that something did not happen.
+
+If half or more of the checked workflows look silent at once, `checkSuspect` is true and `hint`
+says why: either they really all stopped, which is what a restart that did not re-register the
+triggers looks like, or the check cannot see what it needs, most often an instance running with
+`EXECUTIONS_DATA_SAVE_ON_SUCCESS=none`. Open one of them in n8n before acting on it.
 
 ## Known limits
 
-Both of these are real, and the first one is the reason external monitoring exists at all.
+- **It lives inside the instance it watches.** The heartbeat tells you the checker stopped, not
+  which of your workflows did.
+- **It judges schedules, not work.** A workflow that runs on time and produces nothing looks
+  healthy to it.
+- **It reads up to 250 active workflows**, one API page. Past that, some are not checked.
+- The code nodes avoid arrow functions, template literals and optional chaining on purpose: the
+  firewall in front of the n8n template portal rejects uploads that contain them.
 
-- **It lives inside the instance it watches.** If that instance is down, mid-restart, or its
-  schedule triggers never re-registered, this check does not run either — and its silence looks
-  exactly like everything being fine. A self-check cannot cover the case where the checker is
-  the thing that failed.
-- **It reads the last 250 executions.** On a busy instance, a workflow that went quiet weeks ago
-  can fall out of that window. Raise the limit in both HTTP nodes, or run the check more often.
+## Credit
+
+The heartbeat, the not-covered answers and the hit-rate warning came from posts by
+[moneywithjjcom](https://community.n8n.io/u/moneywithjjcom) on the n8n community forum.
 
 ## Six more failures that produce no error
 
@@ -67,7 +123,7 @@ Written up with the one check that catches each, at
 [duskwatch.me/checklist](https://duskwatch.me/checklist?ref=github).
 
 Built by the people behind [Duskwatch](https://duskwatch.me), which runs these checks from outside
-the instance across several client instances. This workflow is the single-instance version, free
-and MIT, and there is nothing in it that phones home — read the JSON.
+the instance across every client instance you manage. This workflow is the single-instance
+version, free and MIT, and there is nothing in it that phones home. Read the JSON.
 
 Tested against n8n 2.37.

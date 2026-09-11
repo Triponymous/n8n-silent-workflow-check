@@ -4,17 +4,17 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Silent workflow check\n\nFinds workflows that are **active but have not run** — the failure mode that produces no failed execution and therefore no error workflow alert.\n\n### Setup (2 minutes)\n1. In n8n: **Settings → n8n API → Create an API key**.\n2. On **Get workflows**, create a *Header Auth* credential:\n   - Name: `X-N8N-API-KEY`\n   - Value: your API key\n   Reuse the same credential on **Get executions**.\n3. In **Configuration**, set `baseUrl` to your n8n address (no trailing slash) and `staleHours` to how long silence is still normal.\n4. Attach your own alert node after **Find silent workflows**.\n\n### The catch\nThis workflow lives inside the instance it watches. If that instance is down, restarting, or its\nschedule triggers did not re-register, this check does not run either — and its silence looks\nexactly like everything being fine.\n\nThat is the one failure it cannot cover. Watching from outside is the only thing that does:\nhttps://duskwatch.me/checklist?ref=template",
-        "height": 620,
-        "width": 460
+        "content": "## Silent workflow check\n\nFinds scheduled workflows that stopped running. That failure produces no failed execution, so an error workflow never fires for it.\n\nEvery workflow that starts itself (Schedule, Cron or Interval trigger) is judged against its own schedule. It counts as silent once twice its interval plus five minutes has passed without a run. Workflows started from outside, like webhooks and forms, are not judged: idle is normal for them.\n\n### Setup, about three minutes\n1. In n8n open Settings, then n8n API, and create an API key.\n2. On Get workflows, create a Header Auth credential. Name: X-N8N-API-KEY. Value: your API key. Use the same credential on Get last run.\n3. In Configuration, set baseUrl to your n8n address without a trailing slash.\n4. After Find silent workflows, add an IF on silent greater than 0 and send the summary field to Slack, email or wherever your alerts go.\n\n### Watching the watcher\nThis workflow lives inside the instance it watches. If the instance is down, or its schedule triggers did not come back after a restart, this check does not run either, and its silence looks exactly like everything being fine.\n\nA heartbeat closes that gap. Create a free check at a dead man's switch service such as healthchecks.io and paste its ping URL into heartbeatUrl in Configuration. The ping goes out on every run, with or without findings, and the service tells you when the pings stop. If the ping itself fails, the run carries on, so a broken heartbeat service never swallows a real finding.\n\n### When it refuses to answer\nSome workflows cannot be judged from execution history. They are listed under notCovered with the reason instead of being guessed at: schedules that are not a fixed interval, workflows set not to save successful executions, workflows changed recently that have not run since, and rare schedules whose last run n8n may already have deleted.\n\nIf half or more of the checked workflows look silent, checkSuspect is true. Either they really all stopped, or the check cannot see what it needs. Look at one of them by hand first.\n\nThe heartbeat, the hit rate warning and the not covered answers came from moneywithjjcom on the n8n community forum.\n\nDuskwatch runs these checks from outside the instance, for every client instance you manage: https://duskwatch.me/checklist?ref=template",
+        "height": 1240,
+        "width": 580
       },
       "id": "8f1c0a10-0000-4000-8000-000000000001",
       "name": "Read me",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -460,
-        -120
+        -680,
+        -320
       ]
     },
     {
@@ -32,7 +32,7 @@
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [
-        40,
+        0,
         100
       ]
     },
@@ -48,9 +48,9 @@
             },
             {
               "id": "a2",
-              "name": "staleHours",
-              "value": 26,
-              "type": "number"
+              "name": "heartbeatUrl",
+              "value": "",
+              "type": "string"
             }
           ]
         },
@@ -61,15 +61,28 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        260,
+        220,
         100
       ]
     },
     {
       "parameters": {
-        "url": "={{ $json.baseUrl }}/api/v1/workflows?limit=250",
+        "url": "={{ $json.baseUrl }}/api/v1/workflows",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "active",
+              "value": "true"
+            },
+            {
+              "name": "limit",
+              "value": "250"
+            }
+          ]
+        },
         "options": {}
       },
       "id": "8f1c0a10-0000-4000-8000-000000000004",
@@ -77,38 +90,114 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        480,
+        440,
         100
       ]
     },
     {
       "parameters": {
-        "url": "={{ $('Configuration').first().json.baseUrl }}/api/v1/executions?limit=250",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "options": {}
+        "jsCode": "// One item per active workflow, so Get last run can ask for the latest execution of each.\n// Written without arrow functions, template literals or optional chaining on purpose: the n8n\n// template portal rejects uploads that contain them.\nvar list = $input.first().json.data || [];\nvar out = [];\nfor (var i = 0; i < list.length; i++) {\n  var w = list[i];\n  if (!w.active || w.isArchived) continue;\n  out.push({ json: { id: String(w.id), name: w.name, updatedAt: w.updatedAt || null, nodes: w.nodes || [], settings: w.settings || {} } });\n}\n// A check that cannot read must not report that all is well.\nif (out.length === 0) {\n  throw new Error('The n8n API returned no active workflows. Check baseUrl in Configuration and that the API key can see this instance.');\n}\nreturn out;"
       },
       "id": "8f1c0a10-0000-4000-8000-000000000005",
-      "name": "Get executions",
+      "name": "One item per workflow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Configuration').first().json.baseUrl }}/api/v1/executions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "workflowId",
+              "value": "={{ $json.id }}"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8f1c0a10-0000-4000-8000-000000000006",
+      "name": "Get last run",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        700,
+        880,
         100
       ]
     },
     {
       "parameters": {
-        "jsCode": "const cfg = $('Configuration').first().json;\nconst stunden = Number(cfg.staleHours) || 24;\n\nconst workflows = ($('Get workflows').first().json.data || []).filter((w) => w.active && !w.isArchived);\nconst executions = $('Get executions').first().json.data || [];\n\n// Letzter Lauf je Workflow. Das Fenster reicht nur so weit zurueck wie limit=250 —\n// bei sehr vielen Ausfuehrungen kann ein stiller Workflow dadurch uebersehen werden.\nconst zuletzt = new Map();\nfor (const e of executions) {\n  const id = String(e.workflowId);\n  const t = new Date(e.startedAt || e.createdAt).getTime();\n  if (!Number.isFinite(t)) continue;\n  if (!zuletzt.has(id) || t > zuletzt.get(id)) zuletzt.set(id, t);\n}\n\nconst jetzt = Date.now();\nconst grenze = jetzt - stunden * 3600 * 1000;\nconst still = [];\n\nfor (const w of workflows) {\n  const t = zuletzt.get(String(w.id));\n  if (t === undefined) {\n    still.push({ workflow: w.name, workflowId: w.id, lastRun: null, hoursSilent: null, note: 'no execution in the window' });\n  } else if (t < grenze) {\n    still.push({ workflow: w.name, workflowId: w.id, lastRun: new Date(t).toISOString(), hoursSilent: Math.round((jetzt - t) / 3600000), note: 'active but stalled' });\n  }\n}\n\nif (still.length === 0) return [{ json: { silent: 0, activeChecked: workflows.length } }];\nreturn still.map((json) => ({ json }));"
+        "jsCode": "// Judges every workflow that starts itself against its own schedule, with the rule Duskwatch uses:\n// silent once twice its interval plus five minutes has passed without a run. Workflows started from\n// outside (webhooks, forms, chats, app triggers) are not judged. Idle is normal for them, and a check\n// that calls idle broken gets muted within a week.\n// Written without arrow functions, template literals or optional chaining on purpose: the n8n\n// template portal rejects uploads that contain them.\n\nvar MINUTE = 60000;\n// n8n deletes executions after 14 days unless configured otherwise. Past that, a missing run proves nothing.\nvar KEPT_MINUTES = 14 * 24 * 60;\nvar PER_UNIT = { seconds: 1 / 60, minutes: 1, hours: 60, days: 1440, weeks: 10080, months: 43200 };\n// n8n leaves default values out of a saved workflow, so a missing value means the default.\nvar UNIT_DEFAULT = { seconds: 30, minutes: 5, hours: 1, days: 1, weeks: 1, months: 1 };\n\nfunction positive(v) {\n  return typeof v === 'number' && isFinite(v) && v > 0 ? v : null;\n}\n\nfunction toMinutes(value, unit) {\n  return Math.max(1, Math.round(value * PER_UNIT[unit]));\n}\n\nfunction smaller(a, b) {\n  if (a === null) return b;\n  if (b === null) return a;\n  return Math.min(a, b);\n}\n\nfunction isWholeNumber(s) {\n  return s !== '' && String(parseInt(s, 10)) === s;\n}\n\n// Every-N notation in a cron field: an asterisk, a slash, a number. Gives the number, or null.\nfunction everyN(s) {\n  if (s.charAt(0) !== '*' || s.charAt(1) !== '/') return null;\n  var n = s.slice(2);\n  return isWholeNumber(n) ? Math.max(1, parseInt(n, 10)) : null;\n}\n\n// Fixed intervals only: every N minutes or hours, a fixed minute every hour, a fixed time every day.\n// Weekday lists and the like give null, and the workflow is listed as not covered.\nfunction cronMinutes(expression) {\n  var parts = String(expression || '').split(' ').filter(function (p) { return p !== ''; });\n  if (parts.length === 6) parts = parts.slice(1);\n  if (parts.length !== 5) return null;\n  var minute = parts[0];\n  var hour = parts[1];\n  if (parts[2] !== '*' || parts[3] !== '*' || (parts[4] !== '*' && parts[4] !== '?')) return null;\n  if (everyN(minute) !== null && hour === '*') return everyN(minute);\n  if (!isWholeNumber(minute)) return null;\n  if (hour === '*') return 60;\n  if (everyN(hour) !== null) return everyN(hour) * 60;\n  return isWholeNumber(hour) ? 1440 : null;\n}\n\nfunction scheduleRuleMinutes(rule) {\n  var field = rule.field || 'days';\n  if (field === 'cronExpression') return cronMinutes(rule.expression);\n  if (!PER_UNIT.hasOwnProperty(field)) return null;\n  return toMinutes(positive(rule[field + 'Interval']) || UNIT_DEFAULT[field], field);\n}\n\nfunction legacyCronMinutes(item) {\n  var mode = item.mode || 'everyDay';\n  if (mode === 'everyMinute') return 1;\n  if (mode === 'everyHour') return 60;\n  if (mode === 'everyDay') return 1440;\n  if (mode === 'everyWeek') return 10080;\n  if (mode === 'everyMonth') return 43200;\n  if (mode === 'everyX') return toMinutes(positive(item.value) || 1, item.unit === 'hours' ? 'hours' : 'minutes');\n  if (mode === 'custom') return cronMinutes(item.cronExpression);\n  return null;\n}\n\n// Does the workflow start itself, and if so, how often? Disabled trigger nodes do not count.\nfunction scheduleOf(nodes) {\n  var scheduled = false;\n  var minutes = null;\n  for (var i = 0; i < nodes.length; i++) {\n    var node = nodes[i];\n    var p = node.parameters || {};\n    if (node.disabled) continue;\n    if (node.type === 'n8n-nodes-base.scheduleTrigger') {\n      scheduled = true;\n      var rules = p.rule ? p.rule.interval || [] : [{}];\n      for (var r = 0; r < rules.length; r++) minutes = smaller(minutes, scheduleRuleMinutes(rules[r]));\n    } else if (node.type === 'n8n-nodes-base.cron') {\n      scheduled = true;\n      var items = (p.triggerTimes && p.triggerTimes.item) || [];\n      for (var c = 0; c < items.length; c++) minutes = smaller(minutes, legacyCronMinutes(items[c]));\n    } else if (node.type === 'n8n-nodes-base.intervalTrigger') {\n      scheduled = true;\n      minutes = smaller(minutes, toMinutes(positive(p.interval) || 1, PER_UNIT.hasOwnProperty(p.unit) ? p.unit : 'seconds'));\n    }\n  }\n  return { scheduled: scheduled, minutes: minutes };\n}\n\nfunction every(minutes) {\n  if (minutes % 1440 === 0) return minutes === 1440 ? 'every day' : 'every ' + minutes / 1440 + ' days';\n  if (minutes % 60 === 0) return minutes === 60 ? 'every hour' : 'every ' + minutes / 60 + ' hours';\n  return minutes === 1 ? 'every minute' : 'every ' + minutes + ' minutes';\n}\n\nvar now = Date.now();\nvar workflows = $('One item per workflow').all();\nvar lookups = $input.all();\nvar findings = [];\nvar notCovered = [];\nvar judged = 0;\nvar notScheduled = 0;\n\nfunction notJudged(w, reason) {\n  notCovered.push({ workflow: w.name, workflowId: w.id, reason: reason });\n}\n\nfor (var i = 0; i < workflows.length; i++) {\n  var w = workflows[i].json;\n  var schedule = scheduleOf(w.nodes || []);\n  if (!schedule.scheduled) {\n    notScheduled++;\n    continue;\n  }\n  if (schedule.minutes === null) {\n    notJudged(w, 'Its schedule is not a fixed interval, weekdays only for example, so there is no gap to measure against.');\n    continue;\n  }\n  if (w.settings && w.settings.saveDataSuccessExecution === 'none') {\n    notJudged(w, 'It is set not to save successful executions, so a healthy run leaves no trace to find.');\n    continue;\n  }\n  var allowed = Math.max(2 * schedule.minutes + 5, 10);\n  var runs = (lookups[i] && lookups[i].json && lookups[i].json.data) || [];\n  var last = runs.length > 0 ? Date.parse(runs[0].startedAt || runs[0].createdAt) : NaN;\n  if (isNaN(last)) {\n    if (allowed > KEPT_MINUTES) {\n      notJudged(w, 'No saved execution, but it runs less often than n8n keeps executions by default, so that proves nothing.');\n      continue;\n    }\n    var changed = Date.parse(w.updatedAt);\n    if (!isNaN(changed) && now - changed < allowed * MINUTE) {\n      notJudged(w, 'Changed recently and has not run since. Too early to tell.');\n      continue;\n    }\n    judged++;\n    findings.push({ workflow: w.name, workflowId: w.id, expected: every(schedule.minutes), lastRun: null, hoursSilent: null, note: 'no execution in the saved history' });\n    continue;\n  }\n  judged++;\n  if (now - last > allowed * MINUTE) {\n    findings.push({ workflow: w.name, workflowId: w.id, expected: every(schedule.minutes), lastRun: new Date(last).toISOString(), hoursSilent: Math.round((now - last) / (60 * MINUTE)), note: 'missed at least two scheduled runs' });\n  }\n}\n\n// Half or more of the judged workflows silent: suspect the check before believing it. This counts\n// workflows, not alerts, and it stays a suspicion. A restart that did not re-register the schedule\n// triggers really does stop everything at once.\nvar checkSuspect = judged >= 4 && findings.length * 2 >= judged;\nvar hint = checkSuspect\n  ? 'Half or more of the scheduled workflows look silent. Either they really all stopped, which is what a restart that did not re-register the schedule triggers looks like, or this check cannot see what it needs, most often because the instance does not save successful executions (EXECUTIONS_DATA_SAVE_ON_SUCCESS=none). Open one of them in n8n and look at its executions before acting on this.'\n  : '';\n\nvar lines = [];\nfor (var f = 0; f < findings.length; f++) {\n  var x = findings[f];\n  lines.push(x.workflow + ' (' + (x.lastRun ? 'last run ' + x.hoursSilent + ' h ago' : 'no saved run') + ', expected ' + x.expected + ')');\n}\nvar summary = judged === 0\n  ? 'No scheduled workflow could be judged.'\n  : findings.length === 0\n    ? 'No scheduled workflow missed its schedule (' + judged + ' checked).'\n    : findings.length + ' of ' + judged + ' checked workflows missed their schedule: ' + lines.join('; ') + '.';\nif (notCovered.length > 0) summary += ' ' + notCovered.length + ' could not be judged, see notCovered.';\nif (hint) summary += ' ' + hint;\n\nreturn [{ json: { silent: findings.length, summary: summary, findings: findings, notCovered: notCovered, judged: judged, notScheduled: notScheduled, checkSuspect: checkSuspect, hint: hint } }];"
       },
-      "id": "8f1c0a10-0000-4000-8000-000000000006",
+      "id": "8f1c0a10-0000-4000-8000-000000000007",
       "name": "Find silent workflows",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        920,
+        1100,
         100
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "b7e1c2d4-0000-4000-8000-000000000001",
+              "leftValue": "={{ $('Configuration').first().json.heartbeatUrl }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8f1c0a10-0000-4000-8000-000000000008",
+      "name": "Heartbeat URL set",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Configuration').first().json.heartbeatUrl }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "8f1c0a10-0000-4000-8000-000000000009",
+      "name": "Ping heartbeat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        280
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -138,14 +227,25 @@
       "main": [
         [
           {
-            "node": "Get executions",
+            "node": "One item per workflow",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Get executions": {
+    "One item per workflow": {
+      "main": [
+        [
+          {
+            "node": "Get last run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get last run": {
       "main": [
         [
           {
@@ -154,6 +254,29 @@
             "index": 0
           }
         ]
+      ]
+    },
+    "Find silent workflows": {
+      "main": [
+        [
+          {
+            "node": "Heartbeat URL set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Heartbeat URL set": {
+      "main": [
+        [
+          {
+            "node": "Ping heartbeat",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
       ]
     }
   },
