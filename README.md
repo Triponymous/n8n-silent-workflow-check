@@ -15,6 +15,10 @@ workflow's own schedule. A workflow counts as silent once twice its interval plu
 has passed without a run: a 15-minute sync is flagged after 35 minutes, a daily report after two
 days, and there is no threshold to set per workflow.
 
+Test runs from the editor don't count. Opening a stalled workflow and clicking *Execute* creates
+a fresh execution, but the schedule still isn't firing, so the check skips executions with
+`mode: manual` and looks at the newest of the last 20 that aren't.
+
 Workflows started from outside (webhooks, forms, chats, app triggers) are not judged. Idle is
 normal for them, and a check that calls idle broken gets muted within a week.
 
@@ -111,7 +115,8 @@ triggers looks like, or the check cannot see what it needs, most often an instan
 ## Credit
 
 The heartbeat, the not-covered answers and the hit-rate warning came from posts by
-[moneywithjjcom](https://community.n8n.io/u/moneywithjjcom) on the n8n community forum.
+[moneywithjjcom](https://community.n8n.io/u/moneywithjjcom) on the n8n community forum. Skipping
+editor test runs came from nightly_runs on r/n8n.
 
 ## Six more failures that produce no error
 
